@@ -13,7 +13,7 @@ crossbeam = "0.8.4"
 dialoguer = "0.11.0"
 inline_colorization = "0.1.6"
 is-ip = "0.1.0"
-opusenc = {git = "https://github.com/vsandstrom/opusenc-rs", branch = "homebrew_fix"}
+opusenc = {git = "https://github.com/d-k-bo/opusenc-rs", branch = "pkg-config"}
 regex = "1.11.1"
 ringbuf = "0.4.8"
 serde = { version = "1.0.219", features = ["derive"] }
