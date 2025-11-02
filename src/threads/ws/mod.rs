@@ -1,15 +1,34 @@
-use crate::{Credentials, DEFAULT_CH};
 use std::{
     net::{SocketAddr, TcpStream}, 
     path::Path,
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
-    thread::{sleep, spawn}
+    sync::{
+      atomic::{AtomicBool, Ordering},
+      Arc
+    },
+    thread::{sleep, spawn},
+    time::{Duration, Instant}
+};
+
+use tungstenite::{
+  connect,
+  http::Uri,
+  stream::MaybeTlsStream,
+  ClientRequestBuilder,
+  Message,
+  WebSocket
 };
 
 use crossbeam::channel::{Receiver, bounded};
 use ringbuf::traits::Consumer;
-use tungstenite::{connect, http::Uri, stream::MaybeTlsStream, ClientRequestBuilder, Message, WebSocket};
-use crate::audio::{audio_capture_loop, encode_audio, record_audio};
+
+use crate::{Credentials, DEFAULT_CH};
+use crate::audio::{
+  audio_capture_loop,
+  encode_audio,
+  record_audio
+};
+
+const LOG_TIME: Duration = Duration::from_secs(10);
 
 pub fn thread(
     mut rx: impl Consumer<Item = f32> + Send + 'static,
@@ -106,6 +125,8 @@ fn websocket_connect_loop(shutdown: Arc<AtomicBool>, opus_rx: &Receiver<Vec<u8>>
     .with_header("username", credentials.username.clone())
     .with_header("port", credentials.broadcast_port.to_string());
 
+  let mut last_log = Instant::now();
+
   loop {
     if shutdown.load(Ordering::SeqCst) { break; }
     if !connected.load(Ordering::SeqCst) {
@@ -121,7 +142,10 @@ fn websocket_connect_loop(shutdown: Arc<AtomicBool>, opus_rx: &Receiver<Vec<u8>>
           });
         }
         Err(e) => {
-          eprintln!("HandshakeError: {e}");
+          if last_log.elapsed() > LOG_TIME {
+            eprintln!("HandshakeError: {e}");
+            last_log = Instant::now();
+          }
           sleep(std::time::Duration::from_millis(50));
         }
       }
