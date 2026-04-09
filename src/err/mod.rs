@@ -1,6 +1,10 @@
 use cpal::BuildStreamError;
 #[allow(unused)]
-use inline_colorization::{color_bright_cyan, color_red, color_reset};
+use inline_colorization::{
+  color_bright_cyan,
+  color_red,
+  color_reset
+};
 use std::error::Error;
 
 #[cfg(target_os = "macos")]

@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, TcpStream}, 
+    net::TcpStream, 
     path::Path,
     sync::{
       atomic::{AtomicBool, Ordering},
@@ -32,11 +32,12 @@ const LOG_TIME: Duration = Duration::from_secs(10);
 
 pub fn thread(
     mut rx: impl Consumer<Item = f32> + Send + 'static,
-    url: SocketAddr,
+    url: (&str, u16),
+    tls_enabled: bool,
     filename: Arc<String>,
     credentials: Credentials,
     shutdown: Arc<AtomicBool>
-) {
+) -> Result<(), Box<dyn std::error::Error + Send>> {
   let framesize = 960 * DEFAULT_CH;
   let (opus_tx, opus_rx) = bounded::<Vec<u8>>(4096 * 32);
   let (audio_tx, audio_rx) = bounded::<f32>(4096 * 32);
@@ -52,20 +53,29 @@ pub fn thread(
     encode_audio(shutdown_clone, filename, &audio_rx, &opus_tx, framesize);
   });
 
-  websocket_connect_loop(shutdown, &opus_rx, &url, &credentials);
+  websocket_connect_loop(shutdown, &opus_rx, &url, &credentials, tls_enabled).map_err(|e| 
+    box_err(&format!("Unexpected websocket error {e}"))
+  )?;
+  
+  audio_capture_thread.join().map_err(|e|
+    box_err(&format!("Audio capture join thread error: {e:?}"))
+  )?;
 
-  if let Err(e) = audio_capture_thread.join() { eprintln!("Audio capture join thread error: {e:?}") };
-  if let Err(e) = encoder_thread.join() { eprintln!("Encoder thread join error: {e:?}") };
+  encoder_thread.join().map_err(|e|
+    box_err(&format!("Encoder thread join error: {e:?}"))
+  )?;
+  Ok(())
 }
 
 pub fn rec_thread(
     mut rx: impl Consumer<Item = f32> + Send + 'static,
-    url: SocketAddr,
+    url: (&str, u16),
+    tls_enabled: bool,
     path: &Path,
     filename: Arc<String>,
     credentials: Credentials,
     shutdown: Arc<AtomicBool>
-) {
+) -> Result<(), Box<dyn std::error::Error + Send>> {
   let framesize = 960 * DEFAULT_CH;
   let (opus_tx, opus_rx) = bounded::<Vec<u8>>(4096 * 32);
   let (encode_tx, encode_rx) = bounded::<f32>(4096 * 32);
@@ -91,11 +101,22 @@ pub fn rec_thread(
     record_audio(shutdown_clone, filename_clone, &record_rx, &out_path, framesize);
   });
 
-  websocket_connect_loop(shutdown, &opus_rx, &url, &credentials);
+  websocket_connect_loop(shutdown, &opus_rx, &url, &credentials, tls_enabled).map_err(|e| 
+    box_err(&format!("Unexpected websocket error {e}"))
+  )?;
+  
+  audio_capture_thread.join().map_err(|e|
+    box_err(&format!("Audio capture join thread error: {e:?}"))
+  )?;
 
-  if let Err(e) = audio_capture_thread.join() { eprintln!("Audio capture join thread error: {e:?}") };
-  if let Err(e) = recorder_thread.join() { eprintln!("Recorder thread join error: {e:?}") };
-  if let Err(e) = encoder_thread.join() { eprintln!("Encoder thread join error: {e:?}") };
+  encoder_thread.join().map_err(|e|
+    box_err(&format!("Encoder thread join error: {e:?}"))
+  )?;
+  
+  recorder_thread.join().map_err(|e| box_err(
+    &format!("Recorder thread join error: {e:?}"))
+  )?;
+  Ok(())
 }
 
 fn handle_websocket(shutdown: Arc<AtomicBool>, ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, rx: &Receiver<Vec<u8>>) {
@@ -111,28 +132,28 @@ fn handle_websocket(shutdown: Arc<AtomicBool>, ws: &mut WebSocket<MaybeTlsStream
 }
 
 
-fn websocket_connect_loop(shutdown: Arc<AtomicBool>, opus_rx: &Receiver<Vec<u8>>, url: &SocketAddr, credentials: &Credentials) {
+fn websocket_connect_loop(
+  shutdown: Arc<AtomicBool>,
+  opus_rx: &Receiver<Vec<u8>>, 
+  url: &(&str, u16),
+  credentials: &Credentials,
+  tls_enabled: bool,
+  ) -> Result<(), String> {
   let connected = Arc::new(AtomicBool::new(false));
-  #[cfg(feature="tls")]
-  let uri = Uri::builder()
-    .scheme("wss")
-    .authority(format!("{}:{}", url.ip(), url.port()))
-    .path_and_query("/")
-    .build()
-    .unwrap();
 
-  #[cfg(not(feature="tls"))]
-  let uri = Uri::builder()
-    .scheme("ws")
-    .authority(format!("{}:{}", url.ip(), url.port()))
+  let scheme = if tls_enabled { "wss" } else { "ws" };
+  let uri = match Uri::builder()
+    .scheme(scheme)
+    .authority(format!("{}:{}", url.0, url.1))
     .path_and_query("/")
-    .build()
-    .unwrap();
+    .build() {
+      Ok(url) => url,
+      Err(e) => {return Err(e.to_string())}
+  };
 
   let request = ClientRequestBuilder::new(uri.clone())
-    .with_header("password", credentials.password.clone())
-    .with_header("username", credentials.username.clone())
-    .with_header("port", credentials.upstream_port.to_string());
+    .with_header("password", credentials.get_password())
+    .with_header("username", credentials.get_username());
 
   let mut last_log = Instant::now();
 
@@ -162,5 +183,14 @@ fn websocket_connect_loop(shutdown: Arc<AtomicBool>, opus_rx: &Receiver<Vec<u8>>
       sleep(std::time::Duration::from_millis(50));
     }
   }
+  Ok(())
+}
 
+fn box_err(err: &str) -> Box<dyn std::error::Error + Send + 'static> {
+  Box::new(
+    std::io::Error::new(
+      std::io::ErrorKind::Other, 
+      err
+    )
+  ) as Box<dyn std::error::Error + Send + 'static>
 }
